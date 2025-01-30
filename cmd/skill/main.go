@@ -2,17 +2,21 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/carinfinin/alice-skill/cmd/skill/flags"
+	"github.com/carinfinin/alice-skill/internal/gzip"
 	"github.com/carinfinin/alice-skill/internal/logger"
 	"github.com/carinfinin/alice-skill/internal/models"
 	"go.uber.org/zap"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // функция main вызывается автоматически при запуске приложения
 func main() {
 	// обрабатываем аргументы командной строки
-	ParseFlags()
+	flags.ParseFlags()
 
 	if err := run(); err != nil {
 		panic(err)
@@ -21,14 +25,14 @@ func main() {
 
 // функция run будет полезна при инициализации зависимостей сервера перед запуском
 func run() error {
-	err := logger.Initialize(FlagLogLevel)
+	err := logger.Initialize(flags.FlagLogLevel)
 	if err != nil {
 		return err
 	}
 
-	logger.Log.Info("Running server", zap.String("address", FlagRunAddr))
+	logger.Log.Info("Running server", zap.String("address", flags.FlagRunAddr))
 	// оборачиваем хендлер webhook в middleware с логированием
-	return http.ListenAndServe(FlagRunAddr, logger.RequestLogger(gzipMiddleWare(webhook)))
+	return http.ListenAndServe(flags.FlagRunAddr, logger.RequestLogger(gzipMiddleWare(webhook)))
 }
 
 // функция webhook — обработчик HTTP-запроса
@@ -56,10 +60,30 @@ func webhook(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		return
 	}
+
+	text := "Для вас нет новых сообщений."
+	//первый запрос новой сесст=ии
+	if req.Session.New {
+		// обрабатываем поле Timezone запроса
+		tz, err := time.LoadLocation(req.Timezone)
+		if err != nil {
+			logger.Log.Debug("cannot parse timezone")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+
+		}
+		// получаем текущее время в часовом поясе пользователя
+		now := time.Now().In(tz)
+		hour, minute, _ := now.Clock()
+
+		// формируем текст ответа
+		text = fmt.Sprintf("Точное время %d часов, %d минут. %s", hour, minute, text)
+
+	}
 	// заполняем модель ответа
 	resp := models.Response{
 		Response: models.ResponsePayload{
-			Text: "Извините, я пока ничего не умею",
+			Text: text, // Алиса проговорит новый текст
 		},
 		Version: "1.0",
 	}
@@ -87,7 +111,7 @@ func gzipMiddleWare(h http.HandlerFunc) http.HandlerFunc {
 
 		if supportsGzip {
 			// оборачиваем оригинальный http.ResponseWriter новым с поддержкой сжатия
-			cw := newCompressWriter(writer)
+			cw := gzip.NewCompressWriter(writer)
 			// меняем оригинальный http.ResponseWriter на новый
 			ow = cw
 			// не забываем отправить клиенту все сжатые данные после завершения middleware
@@ -101,7 +125,7 @@ func gzipMiddleWare(h http.HandlerFunc) http.HandlerFunc {
 
 		if sendsGzip {
 			// оборачиваем тело запроса в io.Reader с поддержкой декомпрессии
-			cr, err := newCompressReader(request.Body)
+			cr, err := gzip.NewCompressReader(request.Body)
 			if err != nil {
 				writer.WriteHeader(http.StatusInternalServerError)
 				return
