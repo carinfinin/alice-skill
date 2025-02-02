@@ -3,25 +3,49 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"github.com/carinfinin/alice-skill/internal/store"
+	"github.com/carinfinin/alice-skill/internal/store/mock"
+	"github.com/go-resty/resty/v2"
+	"github.com/golang/mock/gomock"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/go-resty/resty/v2"
-	"github.com/stretchr/testify/assert"
+	"time"
 )
 
 func TestWebhook(t *testing.T) {
-	handler := http.HandlerFunc(webhook)
+	// создадим конроллер моков и экземпляр мок-хранилища
+	ctrl := gomock.NewController(t)
+	s := mock.NewMockStore(ctrl)
+
+	// определим, какой результат будем получать от «хранилища»
+	messages := []store.Message{
+		{
+			Sender:  "411419e5-f5be-4cdb-83aa-2ca2b6648353",
+			Time:    time.Now(),
+			Payload: "Hello!",
+		},
+	}
+
+	// установим условие: при любом вызове метода ListMessages возвращать массив messages без ошибки
+	s.EXPECT().
+		ListMessages(gomock.Any(), gomock.Any()).
+		Return(messages, nil)
+
+	// создадим экземпляр приложения и передадим ему «хранилище»
+	appInstance := newApp(s)
+
+	handler := http.HandlerFunc(appInstance.webhook)
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
 	testCases := []struct {
-		name         string
+		name         string // добавим название тестов
 		method       string
-		body         string
+		body         string // добавим тело запроса в табличные тесты
 		expectedCode int
 		expectedBody string
 	}{
@@ -61,8 +85,7 @@ func TestWebhook(t *testing.T) {
 			method:       http.MethodPost,
 			body:         `{"request": {"type": "SimpleUtterance", "command": "sudo do something"}, "session": {"new": true}, "version": "1.0"}`,
 			expectedCode: http.StatusOK,
-			// ответ стал сложнее, поэтому сравниваем его с шаблоном вместо точной строки
-			expectedBody: `Точное время .* часов, .* минут. Для вас нет новых сообщений.`,
+			expectedBody: `Точное время .* часов, .* минут. Для вас 1 новых сообщений.`,
 		},
 	}
 
@@ -82,7 +105,6 @@ func TestWebhook(t *testing.T) {
 
 			assert.Equal(t, tc.expectedCode, resp.StatusCode(), "Response code didn't match expected")
 			if tc.expectedBody != "" {
-				// сравниваем тело ответа с ожидаемым шаблоном
 				assert.Regexp(t, tc.expectedBody, string(resp.Body()))
 			}
 		})
@@ -90,7 +112,11 @@ func TestWebhook(t *testing.T) {
 }
 
 func TestGzipCompression(t *testing.T) {
-	handler := http.HandlerFunc(gzipMiddleWare(webhook))
+	ctrl := gomock.NewController(t)
+	s := mock.NewMockStore(ctrl)
+	appInstance := newApp(s)
+
+	handler := http.HandlerFunc(gzipMiddleWare(appInstance.webhook))
 
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
